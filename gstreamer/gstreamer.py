@@ -16,12 +16,74 @@ import sys
 import threading
 
 import gi
+import os 
+
+os.environ['XDG_RUNTIME_DIR']='/run/user/1000'
 gi.require_version('Gst', '1.0')
 gi.require_version('GstBase', '1.0')
 gi.require_version('Gtk', '3.0')
 from gi.repository import GLib, GObject, Gst, GstBase, Gtk
 
+# Arducam imports
+from Arducam import *
+import time as utime
+
+once_number = 128
+mode = 0
+start_capture = 0
+buffer = bytearray(once_number)
+
+def initialize_arducam():
+    mycam = ArducamClass(OV2640)
+    mycam.Camera_Detection()
+    mycam.Spi_Test()
+    mycam.Camera_Init()
+    mycam.OV2640_set_JPEG_size(OV2640_1600x1200)
+    utime.sleep(0.1)
+    mycam.clear_fifo_flag()
+    return mycam
+
+mycam = initialize_arducam()
 Gst.init(None)
+
+def read_fifo_burst():
+    count = 0
+    length = mycam.read_fifo_length()
+    mycam.SPI_CS_LOW()
+    mycam.set_fifo_burst()
+    
+    image_data = bytearray()
+
+    while True:
+        mycam.spi.readinto(buffer, start=0, end=once_number)
+        
+        image_data.extend(buffer)
+        
+        utime.sleep(0.00015)
+        count += once_number
+        
+        if count + once_number >= length:
+            count = length - count
+            mycam.spi.readinto(buffer, start=0, end=count)
+            
+            image_data.extend(buffer[:count])
+            
+            mycam.SPI_CS_HIGH()
+            mycam.clear_fifo_flag()
+            break
+    return image_data 
+
+def feed_arducam_to_appsrc(appsrc):
+    while True:
+        mycam.flush_fifo()
+        mycam.start_capture()
+
+        while mycam.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK) == 0:
+            utime.sleep(0.003)  # Wait for capture to complete
+        utime.sleep(0.001)
+        buffer_data = read_fifo_burst() 
+        buffer = Gst.Buffer.new_wrapped(buffer_data)
+        appsrc.emit('push-buffer', buffer)
 
 class GstPipeline:
     def __init__(self, pipeline, user_function, src_size):
@@ -218,6 +280,9 @@ def run_pipeline(user_function,
         PIPELINE = 'v4l2src device=%s ! {src_caps}'%videosrc
     elif videosrc.startswith('http'):
         PIPELINE = 'souphttpsrc location=%s'%videosrc
+    elif videosrc.startswith('arducam'):
+        PIPELINE = 'appsrc name=appsrc ! {src_caps}'
+        SRC_CAPS = 'image/jpeg,width=1600,height=1200,framerate=30/1'
     elif videosrc.startswith('rtsp'):
         PIPELINE = 'rtspsrc location=%s'%videosrc
     else:
@@ -275,4 +340,11 @@ def run_pipeline(user_function,
     print('Gstreamer pipeline:\n', pipeline)
 
     pipeline = GstPipeline(pipeline, user_function, src_size)
+    if videosrc.startswith('arducam'):
+        # Get appsrc element from the pipeline
+        appsrc = pipeline.pipeline.get_by_name('appsrc')
+
+        # Start a thread to feed data from Arducam to appsrc
+        arducam_thread = threading.Thread(target=feed_arducam_to_appsrc, args=(appsrc,))
+        arducam_thread.start()
     pipeline.run()

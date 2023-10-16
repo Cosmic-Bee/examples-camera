@@ -43,6 +43,11 @@ USB/PCIe/M.2 Accelerator.
     bash install_requirements.sh
     ```
 
+## Run demo using Arducam SPI camera
+
+```
+python3 detect.py --videosrc "arducam"
+```
 
 ## Run the classification demo
 
